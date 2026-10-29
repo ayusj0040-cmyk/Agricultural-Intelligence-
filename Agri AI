@@ -87,7 +87,7 @@ STATE_SCHEMES = {
     "Madhya Pradesh": ["Strong Soybean & Pulses support under NMEO/NFSM", "Wheat programmes", "Horticulture expansion"],
     "Karnataka": ["Seed distribution under subsidy", "NMEO-OS & NFSM", "Coffee & plantation support", "Ragi & Maize focus"],
     "Tamil Nadu": ["Groundnut seed & bio-input subsidies", "Horticulture packages under MIDH", "Oilseed programmes"],
-    "Andhra Pradesh": ["Groundnut seed subsidy (often \~40%)", "Free/subsidised power", "Drone & mechanisation subsidies", "Chillies & horticulture"],
+    "Andhra Pradesh": ["Groundnut seed subsidy (often ~40%)", "Free/subsidised power", "Drone & mechanisation subsidies", "Chillies & horticulture"],
     "Telangana": ["Groundnut & Cotton support", "Free power", "Drone & mechanisation subsidies"],
     "West Bengal": ["Rice & Jute support", "Potato schemes", "Tea & horticulture under MIDH"],
     "Kerala": ["Special packages for Rubber, Coconut, Spices, Tea, Coffee", "MIDH support"],
@@ -140,17 +140,53 @@ def adjust_irrigation(base, weather, threshold=10.0):
         })
     return result
 
-def recommend_crop(N, P, K, ph, temp, state):
+
+def mustard_sowing_window_ok(weather, max_rain_mm=0.0):
+    """Mustard should not receive rain in first 7 days after seeding."""
+    rain_7d = float(weather["precip_mm"].head(7).sum())
+    return rain_7d <= max_rain_mm, round(rain_7d, 1)
+
+
+def recommend_crop(N, P, K, ph, temp, state, weather=None):
     scores = {}
     for crop, info in CROP_REQUIREMENTS.items():
-        score = 70
+        score = 30
+
+        # State suitability
         if state in info["states"]:
-            score += 15
+            score += 25
+        else:
+            score -= 8
+
+        # Soil pH and temperature range suitability
         if 6.0 <= ph <= 7.5:
+            score += 10
+        elif 5.5 <= ph <= 8.0:
             score += 5
+
         if 20 <= temp <= 32:
-            score += 5
-        scores[crop] = min(score, 97)
+            score += 8
+        elif 15 <= temp <= 35:
+            score += 4
+
+        # Match with nutrient requirement
+        target = STANDARD_NPK.get(crop, STANDARD_NPK["Default"])
+        nutrient_score = 0
+        for actual, ideal in zip((N, P, K), target):
+            if ideal <= 0:
+                continue
+            delta = abs(actual - ideal) / ideal
+            nutrient_score += max(0, 20 * (1 - delta))
+        score += min(25, nutrient_score)
+
+        # Mustard-specific rainfall rule during sowing window
+        if crop == "Mustard" and weather is not None:
+            rain_7d = float(weather["precip_mm"].head(7).sum())
+            if rain_7d > 0:
+                score -= 35
+
+        scores[crop] = max(0, min(score, 99))
+
     best = max(scores, key=scores.get)
     return best, scores[best]
 
@@ -175,9 +211,21 @@ run_btn = st.sidebar.button("Get AI Recommendation", type="primary")
 # MAIN PAGE
 # ============================================================
 if run_btn:
-    crop, conf = recommend_crop(N, P, K, ph, temp, state)
+    lat, lon = STATE_COORDS[state]
+    weather = get_weather(lat, lon)
+    crop, conf = recommend_crop(N, P, K, ph, temp, state, weather)
 
-    st.success(f"**Recommended Crop: {crop}**   |   Confidence: **{conf}%**")
+    st.success(f"**Recommended Crop: {crop}**   |   Confidence: **{conf:.0f}%**")
+
+    if crop == "Mustard":
+        ok, rain_7d = mustard_sowing_window_ok(weather, max_rain_mm=0.0)
+        if ok:
+            st.success("Mustard sowing is suitable: no rainfall is expected in the first 7 days after seeding.")
+        else:
+            st.warning(
+                f"Mustard sowing restriction: rainfall is forecast at {rain_7d:.1f} mm within 7 days after seeding, which is not suitable. "
+                "Delay sowing until a dry window is available."
+            )
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Water Need", CROP_REQUIREMENTS[crop]["water"])
@@ -198,9 +246,6 @@ if run_btn:
     st.markdown(f"- **Potassium**: {need_K:.0f} kg/ha")
 
     # ----- Weather + Irrigation -----
-    lat, lon = STATE_COORDS[state]
-    weather = get_weather(lat, lon)
-
     st.subheader("Live Weather & Smart Irrigation")
     fig = px.bar(weather, x="date", y="precip_mm", title="14-Day Rainfall Forecast (mm)",
                  labels={"precip_mm": "Rainfall (mm)", "date": "Date"})
@@ -217,8 +262,7 @@ if run_btn:
 
     with st.expander("Central Government Schemes (Applicable across India)", expanded=True):
         for name, desc in CENTRAL_SCHEMES.items():
-            st.markdown(f"**{name}**  
-{desc}")
+            st.markdown(f"**{name}**  \n{desc}")
 
     with st.expander(f"State-specific Schemes – {state}", expanded=True):
         schemes = STATE_SCHEMES.get(state, STATE_SCHEMES["Other"])
