@@ -47,6 +47,19 @@ CROP_REQUIREMENTS = {
     "Potato": {"water": "Frequent moderate", "duration": "90-120 days", "states": ["Uttar Pradesh", "Bihar", "West Bengal", "Gujarat", "Punjab"]},
 }
 
+CROP_TIMING = {
+    "Rice": {"sowing_window": "Mid June to July (Kharif)", "harvest_window": "October to December", "sowing_temp": "25-35°C", "notes": "Best in warm, humid weather with standing water after transplanting."},
+    "Wheat": {"sowing_window": "Late October to November", "harvest_window": "March to April", "sowing_temp": "15-25°C", "notes": "Sow in cool weather; avoid overly hot late-stage conditions."},
+    "Maize": {"sowing_window": "June to July or October to November", "harvest_window": "September to October or February to March", "sowing_temp": "20-30°C", "notes": "Needs warm conditions with good soil moisture during establishment."},
+    "Mustard": {"sowing_window": "Mid October to November", "harvest_window": "February to March", "sowing_temp": "15-25°C (best around 20-22°C)", "notes": "Mustard prefers a dry sowing window. Avoid heavy rain for the first 7 days after sowing."},
+    "Groundnut": {"sowing_window": "June to July", "harvest_window": "October to November", "sowing_temp": "25-32°C", "notes": "Sow after monsoon onset or in a warm, moist seedbed."},
+    "Soybean": {"sowing_window": "June to July", "harvest_window": "October to November", "sowing_temp": "20-30°C", "notes": "Early sowing with good moisture improves stand establishment."},
+    "Cotton": {"sowing_window": "May to June", "harvest_window": "October to January", "sowing_temp": "25-35°C", "notes": "Warm soil and consistent early-season moisture are essential."},
+    "Sugarcane": {"sowing_window": "February to March or October to November", "harvest_window": "10 to 18 months after planting", "sowing_temp": "25-35°C", "notes": "Long duration crop; ideal in warm tropical conditions."},
+    "Potato": {"sowing_window": "October to November", "harvest_window": "February to April", "sowing_temp": "15-25°C", "notes": "Cool, sunny weather is ideal during tuber formation."},
+    "Default": {"sowing_window": "Start of the local rainy season", "harvest_window": "Based on crop duration", "sowing_temp": "20-30°C", "notes": "Use local agronomic advice for the best timing."},
+}
+
 BASE_IRRIGATION = {
     "Wheat": [(20, "First irrigation – Crown root"), (40, "Tillering"), (60, "Jointing"), (80, "Flowering"), (100, "Grain filling")],
     "Rice": [(10, "Maintain standing water"), (30, "Tillering"), (50, "Panicle initiation"), (70, "Flowering")],
@@ -118,6 +131,7 @@ def get_weather(lat, lon, days=14):
             "temp_max": np.random.uniform(28, 36, days).round(1)
         })
 
+
 def adjust_irrigation(base, weather, threshold=10.0):
     today = datetime.now().date()
     result = []
@@ -147,18 +161,26 @@ def mustard_sowing_window_ok(weather, max_rain_mm=0.0):
     return rain_7d <= max_rain_mm, round(rain_7d, 1)
 
 
+def describe_crop_timing(crop):
+    timing = CROP_TIMING.get(crop, CROP_TIMING["Default"])
+    return {
+        "sowing_window": timing["sowing_window"],
+        "harvest_window": timing["harvest_window"],
+        "sowing_temp": timing["sowing_temp"],
+        "notes": timing["notes"],
+    }
+
+
 def recommend_crop(N, P, K, ph, temp, state, weather=None):
     scores = {}
     for crop, info in CROP_REQUIREMENTS.items():
         score = 30
 
-        # State suitability
         if state in info["states"]:
             score += 25
         else:
             score -= 8
 
-        # Soil pH and temperature range suitability
         if 6.0 <= ph <= 7.5:
             score += 10
         elif 5.5 <= ph <= 8.0:
@@ -169,7 +191,6 @@ def recommend_crop(N, P, K, ph, temp, state, weather=None):
         elif 15 <= temp <= 35:
             score += 4
 
-        # Match with nutrient requirement
         target = STANDARD_NPK.get(crop, STANDARD_NPK["Default"])
         nutrient_score = 0
         for actual, ideal in zip((N, P, K), target):
@@ -179,7 +200,6 @@ def recommend_crop(N, P, K, ph, temp, state, weather=None):
             nutrient_score += max(0, 20 * (1 - delta))
         score += min(25, nutrient_score)
 
-        # Mustard-specific rainfall rule during sowing window
         if crop == "Mustard" and weather is not None:
             rain_7d = float(weather["precip_mm"].head(7).sum())
             if rain_7d > 0:
@@ -189,6 +209,7 @@ def recommend_crop(N, P, K, ph, temp, state, weather=None):
 
     best = max(scores, key=scores.get)
     return best, scores[best]
+
 
 # ============================================================
 # SIDEBAR
@@ -203,6 +224,20 @@ ph = st.sidebar.slider("Soil pH", 4.5, 9.0, 6.5)
 temp = st.sidebar.slider("Average Temperature (°C)", 10.0, 40.0, 27.0)
 size = st.sidebar.number_input("Field Size (acres)", 0.5, 100.0, 5.0)
 
+st.sidebar.markdown("---")
+st.sidebar.caption("Choose only one timing target: either the seeding date or the harvest date.")
+planning_mode = st.sidebar.radio(
+    "Planning based on:",
+    ["Expected seeding date", "Expected harvest date"],
+    index=0,
+    horizontal=False,
+)
+
+if planning_mode == "Expected seeding date":
+    target_date = st.sidebar.date_input("Expected seeding date", datetime.today().date())
+else:
+    target_date = st.sidebar.date_input("Expected harvest date", datetime.today().date() + timedelta(days=120))
+
 uploaded_file = st.sidebar.file_uploader("Upload Soil Report / Field Photo", type=["jpg", "png", "jpeg", "pdf"])
 
 run_btn = st.sidebar.button("Get AI Recommendation", type="primary")
@@ -214,8 +249,14 @@ if run_btn:
     lat, lon = STATE_COORDS[state]
     weather = get_weather(lat, lon)
     crop, conf = recommend_crop(N, P, K, ph, temp, state, weather)
+    timing = describe_crop_timing(crop)
 
     st.success(f"**Recommended Crop: {crop}**   |   Confidence: **{conf:.0f}%**")
+
+    if planning_mode == "Expected seeding date":
+        st.info(f"Planning target: sowing around **{target_date.strftime('%d %b %Y')}**")
+    else:
+        st.info(f"Planning target: harvest around **{target_date.strftime('%d %b %Y')}**")
 
     if crop == "Mustard":
         ok, rain_7d = mustard_sowing_window_ok(weather, max_rain_mm=0.0)
@@ -232,7 +273,15 @@ if run_btn:
     c2.metric("Duration", CROP_REQUIREMENTS[crop]["duration"])
     c3.metric("Field Size", f"{size} acres")
 
-    # ----- Fertilizer -----
+    st.subheader("Recommended Sowing & Harvest Timeline")
+    st.markdown(f"- **Best sowing window:** {timing['sowing_window']}")
+    st.markdown(f"- **Best harvest window:** {timing['harvest_window']}")
+    st.markdown(f"- **Suitable sowing temperature:** {timing['sowing_temp']}")
+    st.markdown(f"- **Timing note:** {timing['notes']}")
+
+    if crop == "Mustard":
+        st.warning("Mustard recommendation: sow between mid-October and November, when temperatures are cool and dry. Ideal seeding temperature is about 20-22°C, and low rainfall in the first 7 days is important for stand establishment.")
+
     st.subheader("Fertilizer Recommendation (ICAR Standard)")
     std = STANDARD_NPK.get(crop, STANDARD_NPK["Default"])
     need_N = max(0, std[0] - N)
@@ -245,7 +294,6 @@ if run_btn:
     st.markdown(f"- **Phosphorus**: {need_P:.0f} kg/ha")
     st.markdown(f"- **Potassium**: {need_K:.0f} kg/ha")
 
-    # ----- Weather + Irrigation -----
     st.subheader("Live Weather & Smart Irrigation")
     fig = px.bar(weather, x="date", y="precip_mm", title="14-Day Rainfall Forecast (mm)",
                  labels={"precip_mm": "Rainfall (mm)", "date": "Date"})
@@ -257,7 +305,6 @@ if run_btn:
     st.write("**Smart Irrigation Schedule** (automatically delayed if rain is expected)")
     st.dataframe(pd.DataFrame(adjusted), use_container_width=True)
 
-    # ----- GOVERNMENT SCHEMES SECTION -----
     st.subheader("Government Schemes You Can Avail")
 
     with st.expander("Central Government Schemes (Applicable across India)", expanded=True):
@@ -271,7 +318,6 @@ if run_btn:
 
     st.info("Note: Always check the latest guidelines on the official websites of Ministry of Agriculture & Farmers Welfare and your State Agriculture Department.")
 
-    # Show uploaded image
     if uploaded_file is not None and uploaded_file.type.startswith("image"):
         st.subheader("Uploaded Photo")
         st.image(Image.open(uploaded_file), width=400)
@@ -285,4 +331,7 @@ else:
     - Live weather + auto-adjusted irrigation dates
     - Central & State government schemes
     - Support for soil report / field photo upload
+    - Recommended seeding month, harvest period and suitable sowing temperature
     """)
+
+    st.caption("Only one timing target can be entered: seeding date or harvest date. This helps plan the crop calendar more accurately.")
